@@ -105,3 +105,55 @@ function validateCLISetup {
     fi
 
 }
+
+
+## LogTimeStamp(): Returns the current timestamp in the specified format.
+function LogTimeStamp() {
+    local timeStampType="${LOG_TIMESTAMP_TYPE:-default}"
+    local timeStamp=""
+
+    case "${timeStampType}" in
+        rfc3339-nano | default)
+            # 2026-06-17T13:43:40.416270044Z
+            timeStamp=$(date '+%Y-%m-%dT%H:%M:%S.%NZ')
+            ;;
+        rfc3339)
+            # 2026-06-17T13:44:03+0000
+            timeStamp=$(date '+%Y-%m-%dT%H:%M:%S%z')
+            ;;
+        iso8601-utc)
+            # 2026-06-17T13:44:44Z
+            timeStamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+            ;;
+        iso8601-nano)
+            # 20260617134518710931653
+            timeStamp=$(date '+%Y%m%d%H%M%S%N')
+            ;;
+        epoch)
+            # 1781703945
+            timeStamp=$(date +%s)
+            ;;
+        *)
+            export LOG_TIMESTAMP_TYPE="rfc3339-nano"
+            timeStamp=$(date '+%Y-%m-%dT%H:%M:%S.%NZ')
+            ;;
+    esac
+    echo ${timeStamp}
+}
+
+## Log(): Provides a standard log format.
+function Log() {
+    local level=$1
+    shift 1 # shift past the level argument
+    local message="$@"
+    local svcName="${thisscript%.*}"
+    local fmt="${LOG_FMT:-n}"  # Default to "n" (text) if not set
+    
+    if [[ $fmt == "n" ]]; then
+        echo "$(LogTimeStamp): ${level}: ${svcName}: ${message}"
+    else
+        echo "{\"level\":\"${level}\",\"message\":\"${svcName}: ${message}\",\"messageKey\":\"\",\"timeStamp\":\"$(LogTimeStamp)\",\"version\": 1 } "
+    fi
+
+}
+
