@@ -1,7 +1,5 @@
 #!/bin/bash
 
-dirname=`dirname "$0"`
-thispath=`cd "$dirname" ; pwd `
 thisScript=`basename "$0"`
 
 #############################################################################
@@ -123,108 +121,58 @@ then
   exit 22
 fi
 
-#  This program will use yq to parse the yaml file on occasion.  Make sure that it resolves.
+#  Requires mikefarah yq v4 with -c (compact sequence indent, matching kustomize output).
 
-yqExists=`which yq 2>&1 | grep -v "no yq"`
-
-if [[ "$yqExists" == "" ]]
+if ! yq -c -n '.' > /dev/null 2>&1
 then
    echo ""
-   echo "ERROR: The yq executable is required by this script and must be on the PATH to execute."
-   echo "       No yq executable found."
+   echo "ERROR: mikefarah yq v4 with -c support must be on the PATH."
    exit 22
 fi
 
-timestamp=`date +%Y%m%d%H%M%S%N`
+#  Each output file is built with ONE yq select so documents keep site.yaml's order,
+#  which kustomize build has already sorted.  Every condition below is a yq expression.
 
-# Roles that grant access to pods/exec (e.g. postgres-operator in current Viya releases)
+admin='.metadata.labels."sas.com/admin"'
+
+# Roles that grant pods/exec (e.g. postgres-operator)
 execRoles='(.kind == "Role" and ([.rules[]?.resources[]?] | any_c(. == "pods/exec")))'
 
-# Labels whose objects normally go to the namespace admin file
-nsLabels='(.metadata.labels."sas.com/admin" == "cluster-wide" or .metadata.labels."sas.com/admin" == "cluster-local" or .metadata.labels."sas.com/admin" == "namespace")'
-if [[ "$insertInternal" == "0" ]]; then
-  nsLabels="($nsLabels or .metadata.labels.\"sas.com/admin\" == \"cluster-admin-internal\")"
-fi
-
-# Cluster-scoped objects (no metadata.namespace, e.g. the sas-logon-app ClusterRoleBinding labelled
-# cluster-wide) can't be created by a namespace admin, so they go to the cluster admin file whatever
-# their sas.com/admin label says.
+# No namespace = cluster-scoped; for example saslogon's requested role for token validation
 clusterScoped='(.metadata.namespace == null)'
 
-# Extra condition for every namespace file select
-nsExclude="($clusterScoped | not)"
-if [[ "$includeExecCluster" == "1" ]]; then
-  nsExclude="$nsExclude and ($execRoles | not)"
-fi
+nsLabels="($admin == \"cluster-wide\" or $admin == \"cluster-local\" or $admin == \"namespace\")"
 
-
-#  Build the cluster admin file
-echo "Creating cluster admin file $outputCluster"
-
-yq eval 'select(.metadata.labels."sas.com/admin" == "cluster-api")' "$inputSite" > "$outputCluster"
-
-#  If there are any extra objects included in the site yaml that need to be put in the cluster admin site yaml, 
-#  mark them with a special label that will include them now.
-#  Make sure they don't also have any of the other labels that would cause them to be duplicated!
+clusterSelect="$admin == \"cluster-api\""
+nsSelect="$nsLabels"
 
 if [[ "$insertInternal" == "1" ]]
 then
-	echo "---" >> "$outputCluster"
-	yq eval 'select(.metadata.labels."sas.com/admin" == "cluster-admin-internal")' "$inputSite" >> "$outputCluster"
+   clusterSelect="$clusterSelect or $admin == \"cluster-admin-internal\""
+else
+   nsSelect="($nsSelect or $admin == \"cluster-admin-internal\")"
 fi
 
 if [[ "$includeExecCluster" == "1" ]]
 then
-   echo "Adding any roles that have pods/exec to $outputCluster"
-   echo "---" >> "$outputCluster"
-   yq eval "select($execRoles)" "$inputSite" >> "$outputCluster"
+   clusterSelect="$clusterSelect or $execRoles"
+   nsSelect="$nsSelect and ($execRoles | not)"
 fi
 
-echo "Adding any cluster-scoped objects with namespace admin labels to $outputCluster"
-echo "---" >> "$outputCluster"
-yq eval "select($clusterScoped and $nsLabels)" "$inputSite" >> "$outputCluster"
+# Move cluster-scoped objects out of the namespace file
+clusterSelect="$clusterSelect or ($clusterScoped and $nsSelect)"
+nsSelect="$nsSelect and ($clusterScoped | not)"
 
-if [[ "$addLabels" == "1" ]]
-then
+#  yq filter appended to the select: add the scope label, keeping label keys sorted as kustomize did
+function scopeLabel {
+   if [[ "$addLabels" == "1" ]]
+   then
+      echo " | .metadata.labels.\"sas.com/admin-scope\" = \"$1\" | .metadata.labels |= sort_keys(.)"
+   fi
+}
 
-   tmpFile="/tmp/site-cluster-admin-${timestamp}.yaml"
-
-   mv "$outputCluster" $tmpFile
-
-   "$thispath/addLabels/addSplitLabels.sh" -c "$tmpFile" -oc "$outputCluster" 
-   
-   rm -f $tmpFile
-
-fi
-
-#  Build the namespace admin file
+echo "Creating cluster admin file $outputCluster"
+yq -c "select($clusterSelect)$(scopeLabel cluster)" "$inputSite" > "$outputCluster" || exit 1
 
 echo "Creating namespace admin file $outputNamespace"
-
-yq eval "select(.metadata.labels.\"sas.com/admin\" == \"cluster-wide\" and $nsExclude)" "$inputSite" > "$outputNamespace"
-echo "---" >> "$outputNamespace"
-
-if [[ "$insertInternal" == "0" ]]
-then
-	yq eval "select(.metadata.labels.\"sas.com/admin\" == \"cluster-admin-internal\" and $nsExclude)" "$inputSite" >> "$outputNamespace"
-	echo "---" >> "$outputNamespace"
-fi
-
-yq eval "select(.metadata.labels.\"sas.com/admin\" == \"cluster-local\" and $nsExclude)" "$inputSite" >> "$outputNamespace"
-echo "---" >> "$outputNamespace"
-yq eval "select(.metadata.labels.\"sas.com/admin\" == \"namespace\" and $nsExclude)" "$inputSite" >> "$outputNamespace"
-
-
-if [[ "$addLabels" == "1" ]]
-then
-
-   tmpFile="/tmp/site-namespace-admin-${timestamp}.yaml"
-
-   mv "$outputNamespace" $tmpFile
-
-   "$thispath/addLabels/addSplitLabels.sh" -n "$tmpFile" -on "$outputNamespace"
-
-   rm -f $tmpFile
-
-fi
-
+yq -c "select($nsSelect)$(scopeLabel namespace)" "$inputSite" > "$outputNamespace" || exit 1
