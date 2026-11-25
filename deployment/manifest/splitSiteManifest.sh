@@ -1,7 +1,5 @@
 #!/bin/bash
 
-thisScript=`basename "$0"`
-
 #############################################################################
 function showHelp {
     echo ""
@@ -18,8 +16,6 @@ function showHelp {
     echo "-e|--include-exec = include any roles that need pods/exec into cluster admin yaml"
     echo "-s|--insert-internal = insert internal cluster objects into cluster admin file"
     echo "-l|--skip-label = by default, a label will be added to all objects in the respective files representing which scope/file they came from.  This option will exclude those labels from being added."
-  
-
 }
 
 #############################################################################
@@ -28,12 +24,10 @@ function showHelp {
 inputSite=""
 outputCluster="site-cluster-admin.yaml"
 outputNamespace="site-namespace-admin.yaml"
-
 includeExecCluster="0"
-
 insertInternal="0"
-
 addLabels="1"
+action=""
 
 ###  Parse the arguments
 
@@ -70,10 +64,6 @@ while [[ $# -gt 0 ]]; do
       shift # past argument
       action="help"
       ;;
-    -*|--*)
-      echo "ERROR: Invalid parameter, $1"
-      exit 22
-      ;;
     *)
       echo "ERROR: Invalid parameter, $1"
       exit 22
@@ -95,14 +85,12 @@ then
   echo "ERROR: The name of the input site yaml file must be passed as a parameter"
   showHelp
   exit 22
-else
-  if [[ ! -f "$inputSite" ]]
-  then
-     echo ""
-     echo "ERROR: The input site yaml file specified does not exist"
-     showHelp
-     exit 22
-  fi
+elif [[ ! -f "$inputSite" ]]
+then
+  echo ""
+  echo "ERROR: The input site yaml file specified does not exist"
+  showHelp
+  exit 22
 fi
 
 if [[ "$outputCluster" == "" ]]
@@ -135,33 +123,29 @@ fi
 
 admin='.metadata.labels."sas.com/admin"'
 
+# Labels applied by SAS's deploy procedure.  Others go to neither file: "none" (build-time
+# inputs, one-off migration jobs) and upgrade-only objects that SAS applies by their own procedure.
+deployable="($admin == \"cluster-api\" or $admin == \"cluster-admin-internal\" or $admin == \"cluster-wide\" or $admin == \"cluster-local\" or $admin == \"namespace\")"
+
+# No namespace = cluster-scoped (e.g. sas-logon-app's ClusterRoleBinding)
+clusterScoped='(.metadata.namespace == null)'
+
 # Roles that grant pods/exec (e.g. postgres-operator)
 execRoles='(.kind == "Role" and ([.rules[]?.resources[]?] | any_c(. == "pods/exec")))'
 
-# No namespace = cluster-scoped; for example saslogon's requested role for token validation
-clusterScoped='(.metadata.namespace == null)'
-
-nsLabels="($admin == \"cluster-wide\" or $admin == \"cluster-local\" or $admin == \"namespace\")"
-
-clusterSelect="$admin == \"cluster-api\""
-nsSelect="$nsLabels"
+# Objects a namespace admin can't create.  The namespace file gets every other deployable
+# object, so the files never overlap and no deployable object is dropped.
+needsClusterAdmin="$admin == \"cluster-api\" or $clusterScoped"
 
 if [[ "$insertInternal" == "1" ]]
 then
-   clusterSelect="$clusterSelect or $admin == \"cluster-admin-internal\""
-else
-   nsSelect="($nsSelect or $admin == \"cluster-admin-internal\")"
+   needsClusterAdmin="$needsClusterAdmin or $admin == \"cluster-admin-internal\""
 fi
 
 if [[ "$includeExecCluster" == "1" ]]
 then
-   clusterSelect="$clusterSelect or $execRoles"
-   nsSelect="$nsSelect and ($execRoles | not)"
+   needsClusterAdmin="$needsClusterAdmin or $execRoles"
 fi
-
-# Move cluster-scoped objects out of the namespace file
-clusterSelect="$clusterSelect or ($clusterScoped and $nsSelect)"
-nsSelect="$nsSelect and ($clusterScoped | not)"
 
 #  yq filter appended to the select: add the scope label, keeping label keys sorted as kustomize did
 function scopeLabel {
@@ -172,7 +156,11 @@ function scopeLabel {
 }
 
 echo "Creating cluster admin file $outputCluster"
-yq -c "select($clusterSelect)$(scopeLabel cluster)" "$inputSite" > "$outputCluster" || exit 1
+yq -c "select($deployable and ($needsClusterAdmin))$(scopeLabel cluster)" "$inputSite" > "$outputCluster" || exit 1
 
 echo "Creating namespace admin file $outputNamespace"
-yq -c "select($nsSelect)$(scopeLabel namespace)" "$inputSite" > "$outputNamespace" || exit 1
+yq -c "select($deployable and (($needsClusterAdmin) | not))$(scopeLabel namespace)" "$inputSite" > "$outputNamespace" || exit 1
+
+#  List what went to neither file, so a new sas.com/admin value in a future release isn't silently dropped
+echo "Not in either file (count, sas.com/admin label):"
+yq "select(.kind != null and ($deployable | not)) | $admin // \"<unlabelled>\"" "$inputSite" | grep -v '^---$' | sort | uniq -c
