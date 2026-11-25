@@ -134,11 +134,11 @@ fi
 
 timestamp=`date +%Y%m%d%H%M%S%N`
 
-pgRoles='(.kind == "Role" and (.metadata.name == "pgo-role" or .metadata.name == "pgo-target-role"))'
+pgoRoles='(.kind == "Role" and (.metadata.name == "pgo-role" or .metadata.name == "pgo-target-role"))'
 
 # Extra condition for every namespace file select
 nsExclude="true"
-if [[ "includeExecCluster" == "1" ]]; then
+if [[ "$includeExecCluster" == "1" ]]; then
   nsExclude="($pgoRoles | not)"
 fi
 
