@@ -134,12 +134,13 @@ fi
 
 timestamp=`date +%Y%m%d%H%M%S%N`
 
-pgoRoles='(.kind == "Role" and (.metadata.name == "pgo-role" or .metadata.name == "pgo-target-role"))'
+# Roles that grant access to pods/exec (e.g. postgres-operator in current Viya releases)
+execRoles='(.kind == "Role" and ([.rules[]?.resources[]?] | any_c(. == "pods/exec")))'
 
 # Extra condition for every namespace file select
 nsExclude="true"
 if [[ "$includeExecCluster" == "1" ]]; then
-  nsExclude="($pgoRoles | not)"
+  nsExclude="($execRoles | not)"
 fi
 
 
@@ -162,7 +163,7 @@ if [[ "$includeExecCluster" == "1" ]]
 then
    echo "Adding any roles that have pods/exec to $outputCluster"
    echo "---" >> "$outputCluster"
-   yq eval "select($pgoRoles)" "$inputSite" >> "$outputCluster"
+   yq eval "select($execRoles)" "$inputSite" >> "$outputCluster"
 fi
 
 if [[ "$addLabels" == "1" ]]
