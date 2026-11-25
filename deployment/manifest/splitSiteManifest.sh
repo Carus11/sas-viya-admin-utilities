@@ -9,6 +9,9 @@ function showHelp {
     echo ""
     echo "This script will create a cluster admin and a separate namespace admin yaml file from the input site.yaml"
     echo ""
+    echo "Cluster-scoped objects (no metadata.namespace) are always put in the cluster admin file, since a"
+    echo "namespace admin cannot create them, even when their sas.com/admin label would place them in the namespace file."
+    echo ""
     echo "Parameters:"
     echo ""
     echo "-i|--input-site-yaml  = The input site.yaml to use as a starting point"
@@ -137,10 +140,21 @@ timestamp=`date +%Y%m%d%H%M%S%N`
 # Roles that grant access to pods/exec (e.g. postgres-operator in current Viya releases)
 execRoles='(.kind == "Role" and ([.rules[]?.resources[]?] | any_c(. == "pods/exec")))'
 
+# Labels whose objects normally go to the namespace admin file
+nsLabels='(.metadata.labels."sas.com/admin" == "cluster-wide" or .metadata.labels."sas.com/admin" == "cluster-local" or .metadata.labels."sas.com/admin" == "namespace")'
+if [[ "$insertInternal" == "0" ]]; then
+  nsLabels="($nsLabels or .metadata.labels.\"sas.com/admin\" == \"cluster-admin-internal\")"
+fi
+
+# Cluster-scoped objects (no metadata.namespace, e.g. the sas-logon-app ClusterRoleBinding labelled
+# cluster-wide) can't be created by a namespace admin, so they go to the cluster admin file whatever
+# their sas.com/admin label says.
+clusterScoped='(.metadata.namespace == null)'
+
 # Extra condition for every namespace file select
-nsExclude="true"
+nsExclude="($clusterScoped | not)"
 if [[ "$includeExecCluster" == "1" ]]; then
-  nsExclude="($execRoles | not)"
+  nsExclude="$nsExclude and ($execRoles | not)"
 fi
 
 
@@ -165,6 +179,10 @@ then
    echo "---" >> "$outputCluster"
    yq eval "select($execRoles)" "$inputSite" >> "$outputCluster"
 fi
+
+echo "Adding any cluster-scoped objects with namespace admin labels to $outputCluster"
+echo "---" >> "$outputCluster"
+yq eval "select($clusterScoped and $nsLabels)" "$inputSite" >> "$outputCluster"
 
 if [[ "$addLabels" == "1" ]]
 then
