@@ -134,6 +134,15 @@ fi
 
 timestamp=`date +%Y%m%d%H%M%S%N`
 
+pgRoles='(.kind == "Role" and (.metadata.name == "pgo-role" or .metadata.name == "pgo-target-role"))'
+
+# Extra condition for every namespace file select
+nsExclude="true"
+if [[ "includeExecCluster" == "1" ]]; then
+  nsExclude="($pgoRoles | not)"
+fi
+
+
 #  Build the cluster admin file
 echo "Creating cluster admin file $outputCluster"
 
@@ -152,12 +161,8 @@ fi
 if [[ "$includeExecCluster" == "1" ]]
 then
    echo "Adding any roles that have pods/exec to $outputCluster"
-
-	echo "---" >> "$outputCluster"
-	yq eval 'select(.kind == "Role" and .metadata.name == "pgo-role")' "$inputSite" >> "$outputCluster"
-	echo "---" >> "$outputCluster"
-	yq eval 'select(.kind == "Role" and .metadata.name == "pgo-target-role")' "$inputSite" >> "$outputCluster"
-	echo "---" >> "$outputCluster"
+   echo "---" >> "$outputCluster"
+   yq eval "select($pgoRoles)" "$inputSite" >> "$outputCluster"
 fi
 
 if [[ "$addLabels" == "1" ]]
@@ -177,67 +182,19 @@ fi
 
 echo "Creating namespace admin file $outputNamespace"
 
-yq eval 'select(.metadata.labels."sas.com/admin" == "cluster-wide")' "$inputSite" > "$outputNamespace"
+yq eval "select(.metadata.labels.\"sas.com/admin\" == \"cluster-wide\" and $nsExclude)" "$inputSite" > "$outputNamespace"
 echo "---" >> "$outputNamespace"
 
 if [[ "$insertInternal" == "0" ]]
 then
-	yq eval 'select(.metadata.labels."sas.com/admin" == "cluster-admin-internal")' "$inputSite" >> "$outputNamespace"
+	yq eval "select(.metadata.labels.\"sas.com/admin\" == \"cluster-admin-internal\" and $nsExclude)" "$inputSite" >> "$outputNamespace"
 	echo "---" >> "$outputNamespace"
 fi
 
-yq eval 'select(.metadata.labels."sas.com/admin" == "cluster-local")' "$inputSite" >> "$outputNamespace"
+yq eval "select(.metadata.labels.\"sas.com/admin\" == \"cluster-local\" and $nsExclude)" "$inputSite" >> "$outputNamespace"
 echo "---" >> "$outputNamespace"
-yq eval 'select(.metadata.labels."sas.com/admin" == "namespace")' "$inputSite" >> "$outputNamespace"
-echo "---" >> "$outputNamespace"
+yq eval "select(.metadata.labels.\"sas.com/admin\" == \"namespace\" and $nsExclude)" "$inputSite" >> "$outputNamespace"
 
-#  If we are to put the pods/exec roles in the cluster admin site, we need to remove them from 
-#  the namespace site yaml.  
-#  I couldn't figure out a reliable way to do this with yq, so back to kustomize
-#
-
-if [[ "$includeExecCluster" == "1" ]]
-then
-
-   echo "Removing any roles that have pods/exec from $outputNamespace"
-
-   workArea="/tmp/buildAdmin-workarea-${timestamp}"
-
-   mkdir "$workArea"
-
-   cp $thispath/kustomizations/* "$workArea"
-
-   #  Copy the file to update
-
-   nsFilename=`basename "$outputNamespace"`
-
-   cp "$outputNamespace" "$workArea/in-site.yaml"
-
-   #  Replace the namespace in the kustomization files
-
-   pushd "$workArea" > /dev/null
-   #  Replace the namespace in the kustomization files
-
-   namespace=`grep "namespace:" in-site.yaml | head -1 | cut -d' ' -f4`
-
-   find . -name '*.yaml' | xargs -l sed -i "s/\${NAMESPACE}/$namespace/g" 
-
-   kustomize build . > "$nsFilename" 
-
-   #  The kustomization that removes the objects leaves empty objects in it, so
-   #  remove those now or kubectl apply will fail
-
-   sed -i "/^{}/d" "$nsFilename"
-   
-   popd > /dev/null
-
-   #  Now replace the output namespace admin file with the updated one
-
-   cp -f "$workArea/$nsFilename" "$outputNamespace"
-
-   rm -r "$workArea"
-
-fi
 
 if [[ "$addLabels" == "1" ]]
 then
